@@ -35,23 +35,26 @@ export interface IdempotencyStoreContractOptions {
    * `vi.useFakeTimers({ toFake: ['Date'] })` before each case, and
    * `advanceTime: (ms) => vi.setSystemTime(Date.now() + ms)`. Default: wait
    * in real time, for a store whose clock can't be moved, such as a Redis
-   * server. The expiry cases then take about `3 * lockTtl + lockTtl / 4`,
-   * which grows with `lockTtl` and can pass the per-test timeout.
+   * server. The slowest expiry case then waits about
+   * `3 * lockTtl + lockTtl / 4` in real time, which grows with `lockTtl` and
+   * can pass the per-test timeout.
    */
   advanceTime?: (ms: number) => unknown;
   /**
    * The lock's time to live, in ms, used by the expiry cases: a record's ttl
    * is `3 * lockTtl` and each expiry margin is `lockTtl / 4`, rounded. The
-   * cases that aren't about expiry take a lock that outlives them, so raising
-   * it only widens the margins, for a store whose calls are slow (a network
-   * round trip per statement against a shared database).
+   * cases that aren't about expiry take a lock and a record that outlive them,
+   * so raising it only widens the margins, for a store whose calls are slow (a
+   * network round trip per statement against a shared database).
    *
-   * Without `advanceTime` the expiry cases wait in real time for about
-   * `3 * lockTtl + lockTtl / 4` in total, so past roughly 1_500 ms they run
-   * past the 5 s default per-test timeout in Vitest and Jest (raise it too).
-   * Must be an integer of at least 4 (a smaller margin is under a millisecond)
-   * and small enough that `3 * lockTtl + lockTtl / 4` stays under 30 days.
-   * Default: `600`.
+   * Without `advanceTime` the slowest expiry case waits in real time for about
+   * `3 * lockTtl + lockTtl / 4`, so past roughly 1_500 ms it runs past the 5 s
+   * default per-test timeout in Vitest and Jest (raise it too). Must be an
+   * integer of at least 4, so `lockTtl / 4` is at least 1 ms, and small enough
+   * that `3 * lockTtl + lockTtl / 4` stays under 30 days. With the default
+   * real-time clock it must also keep `3 * lockTtl + lockTtl / 4` within Node's
+   * maximum timer delay (`2 ** 31 - 1` ms); a caller-supplied `advanceTime`
+   * isn't held to that limit, as it need not use Node timers. Default: `600`.
    */
   lockTtl?: number;
   /**
@@ -73,11 +76,17 @@ export interface IdempotencyStoreContractCase {
 /** 30 days in ms: past a 32-bit integer (2,147,483,647). */
 const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
 
-/** The smallest lock ttl whose rounded expiry margin is at least 1 ms. */
+/** Node's maximum `setTimeout` delay, in ms: larger values clamp and fire almost immediately. */
+const MAX_TIMER_DELAY = 2 ** 31 - 1;
+
+/** The smallest lock ttl whose expiry margin (`lockTtl / 4`) is at least 1 ms. */
 const MIN_LOCK_TTL = 4;
 
 /** The lock ttl for the cases that aren't about expiry: long enough to outlive any of them. */
 const LONG_LOCK_TTL = THIRTY_DAYS;
+
+/** The record ttl for the cases that aren't about expiry: long enough to outlive any of them. */
+const LONG_RECORD_TTL = THIRTY_DAYS;
 
 const response: IdempotencyStoredResponse = { status: 201, headers: {}, body: { receiptId: 'ch_0001' } };
 
@@ -102,10 +111,16 @@ export function idempotencyStoreContract(
     );
   }
   const MARGIN = Math.round(LOCK_TTL / 4);
-  const TTL = 3 * LOCK_TTL;
-  if (TTL + MARGIN >= THIRTY_DAYS) {
+  const RECORD_TTL = 3 * LOCK_TTL;
+  if (RECORD_TTL + MARGIN >= THIRTY_DAYS) {
     throw new RangeError(
       `idempotencyStoreContract(): lockTtl must keep 3 * lockTtl + lockTtl / 4 under ${THIRTY_DAYS} ms (30 days), got ${options.lockTtl}`,
+    );
+  }
+  const defaultClock = options.advanceTime === undefined;
+  if (defaultClock && RECORD_TTL + MARGIN > MAX_TIMER_DELAY) {
+    throw new RangeError(
+      `idempotencyStoreContract(): lockTtl must keep 3 * lockTtl + lockTtl / 4 within Node's ${MAX_TIMER_DELAY} ms timer delay (or pass an advanceTime), got ${options.lockTtl}`,
     );
   }
 
@@ -146,8 +161,8 @@ export function idempotencyStoreContract(
     const k = key('k');
     await store.acquire(k, 'a', 'fp-a', LONG_LOCK_TTL);
 
-    assert.equal(await store.complete(k, 'b', response, TTL), false, 'complete() by another owner');
-    assert.equal(await store.complete(k, 'a', response, TTL), true, 'complete() by the owner');
+    assert.equal(await store.complete(k, 'b', response, LONG_RECORD_TTL), false, 'complete() by another owner');
+    assert.equal(await store.complete(k, 'a', response, LONG_RECORD_TTL), true, 'complete() by the owner');
 
     expectResult(
       await store.acquire(k, 'c', 'fp-c', LONG_LOCK_TTL),
@@ -159,10 +174,10 @@ export function idempotencyStoreContract(
   test('a completed record is final: complete(), release() and extend() leave it alone', async (store, key) => {
     const k = key('k');
     await store.acquire(k, 'a', 'fp-a', LONG_LOCK_TTL);
-    await store.complete(k, 'a', response, TTL);
+    await store.complete(k, 'a', response, LONG_RECORD_TTL);
 
     const other = { status: 500, headers: {}, body: 'overwritten' };
-    assert.equal(await store.complete(k, 'a', other, TTL), false, 'complete() of a completed record');
+    assert.equal(await store.complete(k, 'a', other, LONG_RECORD_TTL), false, 'complete() of a completed record');
     assert.equal(await store.release(k, 'a'), false, 'release() of a completed record');
     assert.equal(await store.extend(k, 'a', LONG_LOCK_TTL), false, 'extend() of a completed record');
     expectResult(
@@ -190,7 +205,7 @@ export function idempotencyStoreContract(
 
   test('complete(), release() and extend() on a key without a record change nothing', async (store, key) => {
     const k = key('missing');
-    assert.equal(await store.complete(k, 'a', response, TTL), false, 'complete() of a missing key');
+    assert.equal(await store.complete(k, 'a', response, LONG_RECORD_TTL), false, 'complete() of a missing key');
     assert.equal(await store.extend(k, 'a', LONG_LOCK_TTL), false, 'extend() of a missing key');
     assert.equal(await store.release(k, 'a'), false, 'release() of a missing key');
     expectResult(await store.acquire(k, 'a', 'fp-a', LONG_LOCK_TTL), { state: 'acquired' }, 'acquire() afterwards');
@@ -218,10 +233,10 @@ export function idempotencyStoreContract(
   test('extend() leaves a completed record\'s ttl alone', async (store, key) => {
     const k = key('k');
     await store.acquire(k, 'a', 'fp-a', LOCK_TTL);
-    await store.complete(k, 'a', response, TTL);
+    await store.complete(k, 'a', response, RECORD_TTL);
     assert.equal(await store.extend(k, 'a', LOCK_TTL), false, 'extend() of a completed record');
 
-    await advance(TTL - MARGIN); // past lockTtl, before ttl
+    await advance(RECORD_TTL - MARGIN); // past lockTtl, before ttl
     expectResult(
       await store.acquire(k, 'b', 'fp-a', LOCK_TTL),
       { state: 'completed', fingerprint: 'fp-a', response },
@@ -239,7 +254,7 @@ export function idempotencyStoreContract(
 
     expectResult(await store.acquire(k, 'retry', 'fp-b', LOCK_TTL), { state: 'acquired' }, 'acquire() of an expired lock');
     assert.equal(await store.extend(k, 'crashed', LOCK_TTL), false, 'extend() by the stale owner');
-    assert.equal(await store.complete(k, 'crashed', response, TTL), false, 'complete() by the stale owner');
+    assert.equal(await store.complete(k, 'crashed', response, RECORD_TTL), false, 'complete() by the stale owner');
     assert.equal(await store.release(k, 'crashed'), false, 'release() by the stale owner');
 
     expectResult(
@@ -249,7 +264,7 @@ export function idempotencyStoreContract(
     );
 
     const retried = { ...response, body: { receiptId: 'ch_0002' } };
-    assert.equal(await store.complete(k, 'retry', retried, TTL), true, 'complete() by the new owner');
+    assert.equal(await store.complete(k, 'retry', retried, RECORD_TTL), true, 'complete() by the new owner');
     expectResult(
       await store.acquire(k, 'other', 'fp-b', LOCK_TTL),
       { state: 'completed', fingerprint: 'fp-b', response: retried },
@@ -262,7 +277,7 @@ export function idempotencyStoreContract(
     await store.acquire(k, 'a', 'fp-a', LOCK_TTL);
     await advance(LOCK_TTL + MARGIN);
 
-    assert.equal(await store.complete(k, 'a', response, TTL), false, 'complete() of an expired lock');
+    assert.equal(await store.complete(k, 'a', response, RECORD_TTL), false, 'complete() of an expired lock');
     assert.equal(await store.release(k, 'a'), false, 'release() of an expired lock');
     expectResult(await store.acquire(k, 'b', 'fp-b', LOCK_TTL), { state: 'acquired' }, 'acquire() afterwards');
   });
@@ -270,9 +285,9 @@ export function idempotencyStoreContract(
   test('a completed record expires after ttl, and its key is free again', async (store, key) => {
     const k = key('k');
     await store.acquire(k, 'a', 'fp-a', LOCK_TTL);
-    await store.complete(k, 'a', response, TTL);
+    await store.complete(k, 'a', response, RECORD_TTL);
 
-    await advance(TTL - MARGIN);
+    await advance(RECORD_TTL - MARGIN);
     expectResult(
       await store.acquire(k, 'b', 'fp-a', LOCK_TTL),
       { state: 'completed', fingerprint: 'fp-a', response },
@@ -294,7 +309,7 @@ export function idempotencyStoreContract(
     assert.equal(await store.extend(k, 'a', THIRTY_DAYS), true, 'extend() with a 30-day lockTtl');
     assert.equal(await store.complete(k, 'a', response, THIRTY_DAYS), true, 'complete() with a 30-day ttl');
 
-    await advance(TTL);
+    await advance(RECORD_TTL);
     expectResult(
       await store.acquire(k, 'b', 'fp-a', LOCK_TTL),
       { state: 'completed', fingerprint: 'fp-a', response },
@@ -345,7 +360,7 @@ export function idempotencyStoreContract(
       const k = key(`k${i}`);
       const given = structuredClone(payload);
       await store.acquire(k, 'a', 'fp', LONG_LOCK_TTL);
-      assert.equal(await store.complete(k, 'a', given, TTL), true, `complete() with payload #${i}`);
+      assert.equal(await store.complete(k, 'a', given, LONG_RECORD_TTL), true, `complete() with payload #${i}`);
 
       mutate(given); // the caller's object is not the stored record
       const first = await store.acquire(k, 'b', 'fp', LONG_LOCK_TTL);
@@ -385,14 +400,14 @@ export function idempotencyStoreContract(
 
     const results = await race(store, k);
     expectOneWinner(results, fps, 'acquire() of an expired lock');
-    assert.equal(await store.complete(k, 'crashed', response, TTL), false, 'complete() by the stale owner');
+    assert.equal(await store.complete(k, 'crashed', response, RECORD_TTL), false, 'complete() by the stale owner');
   });
 
   test(`concurrency: of ${callers} callers acquiring an expired record at once, exactly one wins`, async (store, key) => {
     const k = key('race');
     await store.acquire(k, 'first', 'fp-first', LOCK_TTL);
-    await store.complete(k, 'first', response, TTL);
-    await advance(TTL + MARGIN);
+    await store.complete(k, 'first', response, RECORD_TTL);
+    await advance(RECORD_TTL + MARGIN);
 
     const results = await race(store, k);
     expectOneWinner(results, fps, 'acquire() of an expired record');
@@ -443,7 +458,7 @@ export function idempotencyStoreContract(
     await store.acquire(k, 'owner', 'fp-owner', LONG_LOCK_TTL);
 
     const [completed, ...results] = await Promise.all([
-      store.complete(k, 'owner', response, TTL),
+      store.complete(k, 'owner', response, LONG_RECORD_TTL),
       ...acquires(store, k),
     ]);
     assert.equal(completed, true, 'complete() by the owner');

@@ -265,10 +265,26 @@ describe('idempotencyStoreContract() against broken stores', () => {
     expect(() => idempotencyStoreContract(fresh, { lockTtl: 0 })).toThrow(RangeError);
     expect(() => idempotencyStoreContract(fresh, { lockTtl: -1 })).toThrow(RangeError);
     expect(() => idempotencyStoreContract(fresh, { lockTtl: 2.5 })).toThrow(RangeError);
-    expect(() => idempotencyStoreContract(fresh, { lockTtl: 1 })).toThrow(RangeError); // margin below 1 ms
+    expect(() => idempotencyStoreContract(fresh, { lockTtl: 1 })).toThrow(RangeError); // lockTtl / 4 is under 1 ms
     expect(() => idempotencyStoreContract(fresh, { lockTtl: 3 })).toThrow(RangeError);
-    expect(() => idempotencyStoreContract(fresh, { lockTtl: 864_000_000 })).toThrow(RangeError); // TTL reaches 30 days
     expect(idempotencyStoreContract(fresh, { lockTtl: 4 })).toHaveLength(13);
     expect(idempotencyStoreContract(fresh, { lockTtl: 1_000 })).toHaveLength(13);
+  });
+
+  it('bounds lockTtl by the real-time timer delay, unless a custom clock is given', () => {
+    const fresh = () => new InMemoryIdempotencyStore();
+    const atTimerLimit = 660_764_199; // 3 * lockTtl + lockTtl / 4 === 2 ** 31 - 1
+    expect(idempotencyStoreContract(fresh, { lockTtl: atTimerLimit, concurrent: true })).toHaveLength(19);
+    expect(() => idempotencyStoreContract(fresh, { lockTtl: atTimerLimit + 1 })).toThrow(RangeError);
+    // A custom clock need not use Node timers, so only the 30-day record ttl limits it.
+    expect(idempotencyStoreContract(fresh, { lockTtl: atTimerLimit + 1, advanceTime: () => {} })).toHaveLength(13);
+  });
+
+  it('bounds lockTtl by the 30-day record ttl, whatever the clock', () => {
+    const fresh = () => new InMemoryIdempotencyStore();
+    const clock = { advanceTime: () => {} };
+    const atRecordLimit = 797_538_461; // 3 * lockTtl + lockTtl / 4 is just under 30 days
+    expect(idempotencyStoreContract(fresh, { lockTtl: atRecordLimit, ...clock })).toHaveLength(13);
+    expect(() => idempotencyStoreContract(fresh, { lockTtl: atRecordLimit + 1, ...clock })).toThrow(RangeError);
   });
 });
