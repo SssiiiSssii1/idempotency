@@ -222,7 +222,7 @@ describe('idempotencyStoreContract() against broken stores', () => {
         await Promise.resolve();
         return shared;
       },
-      { advanceTime: async (ms) => advanceTime(ms), concurrent: { callers: 3 } },
+      { advanceTime: async (ms) => advanceTime(ms), concurrent: { callers: 3 }, lockTtl: 120 },
     );
 
     expect(await failures(cases)).toEqual([]);
@@ -235,5 +235,13 @@ describe('idempotencyStoreContract() against broken stores', () => {
     expect(() => idempotencyStoreContract(fresh, { concurrent: { callers: 2.5 } })).toThrow(RangeError);
     expect(idempotencyStoreContract(fresh, { concurrent: false })).toHaveLength(13);
     expect(idempotencyStoreContract(fresh, { concurrent: {} })).toHaveLength(19);
+  });
+
+  it('refuses a lock ttl that is not a positive whole number of milliseconds', () => {
+    const fresh = () => new InMemoryIdempotencyStore();
+    expect(() => idempotencyStoreContract(fresh, { lockTtl: 0 })).toThrow(RangeError);
+    expect(() => idempotencyStoreContract(fresh, { lockTtl: -1 })).toThrow(RangeError);
+    expect(() => idempotencyStoreContract(fresh, { lockTtl: 2.5 })).toThrow(RangeError);
+    expect(idempotencyStoreContract(fresh, { lockTtl: 1_000 })).toHaveLength(13);
   });
 });

@@ -39,6 +39,14 @@ export interface IdempotencyStoreContractOptions {
    */
   advanceTime?: (ms: number) => unknown;
   /**
+   * The lock's time to live, in ms, used by the cases: a record's ttl is
+   * `3 * lockTtl` and each expiry margin is `lockTtl / 4`. Raise it for a
+   * store whose calls are slow, for example a network round trip per
+   * statement against a shared database, where the 600 ms default can make
+   * the `keeps keys apart exactly` case flaky. Default: `600`.
+   */
+  lockTtl?: number;
+  /**
    * Also run the concurrency cases: many callers race for one key (a free
    * one, an expired lock, an expired record) and exactly one may win, and
    * `acquire()` races `release()` and `complete()`. A store that reads and
@@ -54,10 +62,6 @@ export interface IdempotencyStoreContractCase {
   run: () => Promise<void>;
 }
 
-/** The lock's time to live in the cases, the margin around each expiry, and a record's time to live. */
-const LOCK_TTL = 600;
-const MARGIN = 150;
-const TTL = 3 * LOCK_TTL;
 /** 30 days in ms: past a 32-bit integer (2,147,483,647). */
 const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
 
@@ -75,6 +79,14 @@ export function idempotencyStoreContract(
   const advance = async (ms: number) => {
     await advanceTime(ms);
   };
+
+  /** The lock's time to live, the margin around each expiry, and a record's time to live. */
+  const LOCK_TTL = options.lockTtl ?? 600;
+  if (!Number.isInteger(LOCK_TTL) || LOCK_TTL < 1) {
+    throw new RangeError(`idempotencyStoreContract(): lockTtl must be a positive integer, got ${options.lockTtl}`);
+  }
+  const MARGIN = LOCK_TTL / 4;
+  const TTL = 3 * LOCK_TTL;
 
   const callers =
     options.concurrent === true ? 16 : options.concurrent ? (options.concurrent.callers ?? 16) : 0;
