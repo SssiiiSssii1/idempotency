@@ -70,6 +70,19 @@ class TruncatingStore extends InMemoryIdempotencyStore {
   }
 }
 
+/** Keeps durations in a 32-bit integer: a ttl past 2,147,483,647 ms wraps around to the past. */
+class Int32TtlStore extends InMemoryIdempotencyStore {
+  override acquire(key: string, owner: string, fingerprint: string, lockTtl: number) {
+    return super.acquire(key, owner, fingerprint, lockTtl | 0);
+  }
+  override complete(key: string, owner: string, response: IdempotencyStoredPayload, ttl: number) {
+    return super.complete(key, owner, response, ttl | 0);
+  }
+  override extend(key: string, owner: string, lockTtl: number) {
+    return super.extend(key, owner, lockTtl | 0);
+  }
+}
+
 async function failures(cases: IdempotencyStoreContractCase[]) {
   const failed: string[] = [];
   for (const c of cases) {
@@ -143,6 +156,11 @@ describe('idempotencyStoreContract()', () => {
   it('fails a store that truncates keys', async () => {
     const failed = await failures(idempotencyStoreContract(() => new TruncatingStore(), { advanceTime }));
     expect(failed).toEqual([expect.stringMatching(/^keeps keys apart exactly, however similar or long: acquire\(\) of key #16/)]);
+  });
+
+  it('fails a store that keeps durations in a 32-bit integer', async () => {
+    const failed = await failures(idempotencyStoreContract(() => new Int32TtlStore(), { advanceTime, concurrent: true }));
+    expect(failed).toEqual([expect.stringMatching(/^takes durations of weeks, past a 32-bit integer: extend\(\) with a 30-day lockTtl/)]);
   });
 });
 

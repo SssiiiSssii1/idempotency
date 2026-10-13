@@ -82,11 +82,13 @@ const MAX_TIMER_DELAY = 2 ** 31 - 1;
 /** The smallest lock ttl whose expiry margin (`lockTtl / 4`) is at least 1 ms. */
 const MIN_LOCK_TTL = 4;
 
-/** The lock ttl for the cases that aren't about expiry: long enough to outlive any of them. */
-const LONG_LOCK_TTL = THIRTY_DAYS;
-
-/** The record ttl for the cases that aren't about expiry: long enough to outlive any of them. */
-const LONG_RECORD_TTL = THIRTY_DAYS;
+/**
+ * The lock ttl and record ttl for the cases that aren't about expiry. An hour outlives any of them,
+ * yet lets what they leave in a shared store expire soon, and fits a 32-bit integer, so only the
+ * 30-day case fails a store that overflows one.
+ */
+const LONG_LOCK_TTL = 60 * 60 * 1000;
+const LONG_RECORD_TTL = LONG_LOCK_TTL;
 
 const response: IdempotencyStoredResponse = { status: 201, headers: {}, body: { receiptId: 'ch_0001' } };
 
